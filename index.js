@@ -44,60 +44,68 @@ app.post('/push', async (req, res) => {
   }
 });
 
-// --- 3. UPDATED BALANCE CALCULATOR (Carry-over included) ---
-function calculateBalance(bike) {
+// --- 3. WEEKLY BALANCE CALCULATOR ---
+function calculateWeeklyBalance(bike) {
   const amount = bike.schedule?.amount || 0;
   const days = bike.schedule?.days || [true, true, true, true, true, true, true];
-  const now = new Date();
-  const y = now.getFullYear(), m = now.getMonth();
-
-  // 1. Calculate expected for THIS month up to today
-  let expectedThisMonth = 0;
-  for (let d = 1; d <= now.getDate(); d++) {
-    const date = new Date(y, m, d);
-    const jsDay = date.getDay(); 
-    const idx = jsDay === 0 ? 6 : jsDay - 1; 
-    if (days[idx]) expectedThisMonth += amount;
-  }
-
-  // 2. Calculate total paid THIS month
-  const paidThisMonth = (bike.payments || [])
-    .filter(p => {
-      const d = new Date(p.date);
-      return d.getMonth() === m && d.getFullYear() === y;
-    })
-    .reduce((s, p) => s + p.amount, 0);
-
-  // 3. Calculate balance for LAST month (to carry over)
-  const lastMonthDate = new Date(y, m - 1, 1);
-  const lastY = lastMonthDate.getFullYear();
-  const lastM = lastMonthDate.getMonth();
-  const daysInLastMonth = new Date(lastY, lastM + 1, 0).getDate();
   
-  let expectedLastMonth = 0;
-  for (let d = 1; d <= daysInLastMonth; d++) {
-    const date = new Date(lastY, lastM, d);
-    const jsDay = date.getDay();
-    const idx = jsDay === 0 ? 6 : jsDay - 1;
-    if (days[idx]) expectedLastMonth += amount;
+  const now = new Date();
+  
+  // Get Monday of the current week
+  const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon...
+  const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const startOfThisWeek = new Date(now);
+  startOfThisWeek.setDate(now.getDate() - diffToMonday);
+  startOfThisWeek.setHours(0,0,0,0);
+
+  // Get Monday of last week
+  const startOfLastWeek = new Date(startOfThisWeek);
+  startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
+
+  // 1. Expected for THIS week (Monday up to today)
+  let expectedThisWeek = 0;
+  let tempDate = new Date(startOfThisWeek);
+  while (tempDate <= now) {
+    const jsDay = tempDate.getDay(); 
+    const idx = jsDay === 0 ? 6 : jsDay - 1; 
+    if (days[idx]) expectedThisWeek += amount;
+    tempDate.setDate(tempDate.getDate() + 1);
   }
 
-  const paidLastMonth = (bike.payments || [])
+  // 2. Paid THIS week
+  const paidThisWeek = (bike.payments || [])
     .filter(p => {
       const d = new Date(p.date);
-      return d.getMonth() === lastM && d.getFullYear() === lastY;
+      return d >= startOfThisWeek && d <= now;
     })
     .reduce((s, p) => s + p.amount, 0);
 
-  const lastMonthBalance = paidLastMonth - expectedLastMonth;
+  // 3. Expected for LAST week (Full Monday to Sunday)
+  let expectedLastWeek = 0;
+  let tempLastDate = new Date(startOfLastWeek);
+  for (let i = 0; i < 7; i++) {
+    const jsDay = tempLastDate.getDay();
+    const idx = jsDay === 0 ? 6 : jsDay - 1;
+    if (days[idx]) expectedLastWeek += amount;
+    tempLastDate.setDate(tempLastDate.getDate() + 1);
+  }
 
-  // 4. Final current balance = (Paid this month - Expected this month) + Last Month's leftover
-  const currentBalance = (paidThisMonth - expectedThisMonth) + lastMonthBalance;
+  // 4. Paid LAST week
+  const paidLastWeek = (bike.payments || [])
+    .filter(p => {
+      const d = new Date(p.date);
+      return d >= startOfLastWeek && d < startOfThisWeek;
+    })
+    .reduce((s, p) => s + p.amount, 0);
+
+  // 5. Calculate carry-over and current balance
+  const lastWeekBalance = paidLastWeek - expectedLastWeek;
+  const currentBalance = (paidThisWeek - expectedThisWeek) + lastWeekBalance;
 
   return { 
-    expectedThisMonth, 
-    paidThisMonth, 
-    lastMonthBalance, 
+    expectedThisWeek, 
+    paidThisWeek, 
+    lastWeekBalance, 
     currentBalance 
   };
 }
@@ -111,15 +119,15 @@ app.post('/daily-sms', async (req, res) => {
     // Skip if there is no schedule set
     if (!bike.schedule || bike.schedule.amount === 0) continue;
     
-    const { currentBalance } = calculateBalance(bike);
+    const { currentBalance } = calculateWeeklyBalance(bike);
     const phone = bike.phone.startsWith('+') ? bike.phone : '+' + bike.phone;
     
-    // Clean Swahili Message Logic
+    // Swahili Message Logic for Weekly Balance
     let message = '';
     if (currentBalance >= 0) {
-      message = `Habari ${bike.name}, malipo yamepokelewa. Salio lako la mwezi huu ni +KSh ${currentBalance}. Asante kwa kulipa kwa wakati.`;
+      message = `Habari ${bike.name}, malipo yamepokelewa. Salio lako la wiki hii ni +KSh ${currentBalance}. Asante kwa kulipa kwa wakati.`;
     } else {
-      message = `Habari ${bike.name}, malipo yamepokelewa. Unadaiwa KSh ${Math.abs(currentBalance)}. Tafadhali lipa kwa wakati ili kuepuka usumbufu.`;
+      message = `Habari ${bike.name}, malipo yamepokelewa. Unadaiwa KSh ${Math.abs(currentBalance)} kwa wiki hii. Tafadhali lipa kwa wakati ili kuepuka usumbufu.`;
     }
 
     try {
