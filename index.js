@@ -44,29 +44,62 @@ app.post('/push', async (req, res) => {
   }
 });
 
-// --- 3. CALCULATE BALANCE ---
+// --- 3. UPDATED BALANCE CALCULATOR (Carry-over included) ---
 function calculateBalance(bike) {
   const amount = bike.schedule?.amount || 0;
   const days = bike.schedule?.days || [true, true, true, true, true, true, true];
   const now = new Date();
   const y = now.getFullYear(), m = now.getMonth();
-  let expected = 0;
 
+  // 1. Calculate expected for THIS month up to today
+  let expectedThisMonth = 0;
   for (let d = 1; d <= now.getDate(); d++) {
     const date = new Date(y, m, d);
-    const jsDay = date.getDay(); // 0=Sun, 1=Mon...
-    const idx = jsDay === 0 ? 6 : jsDay - 1; // Convert to Mon-Sun index
-    if (days[idx]) expected += amount;
+    const jsDay = date.getDay(); 
+    const idx = jsDay === 0 ? 6 : jsDay - 1; 
+    if (days[idx]) expectedThisMonth += amount;
   }
 
-  const paid = (bike.payments || [])
+  // 2. Calculate total paid THIS month
+  const paidThisMonth = (bike.payments || [])
     .filter(p => {
       const d = new Date(p.date);
       return d.getMonth() === m && d.getFullYear() === y;
     })
     .reduce((s, p) => s + p.amount, 0);
 
-  return { expected, paid, balance: paid - expected };
+  // 3. Calculate balance for LAST month (to carry over)
+  const lastMonthDate = new Date(y, m - 1, 1);
+  const lastY = lastMonthDate.getFullYear();
+  const lastM = lastMonthDate.getMonth();
+  const daysInLastMonth = new Date(lastY, lastM + 1, 0).getDate();
+  
+  let expectedLastMonth = 0;
+  for (let d = 1; d <= daysInLastMonth; d++) {
+    const date = new Date(lastY, lastM, d);
+    const jsDay = date.getDay();
+    const idx = jsDay === 0 ? 6 : jsDay - 1;
+    if (days[idx]) expectedLastMonth += amount;
+  }
+
+  const paidLastMonth = (bike.payments || [])
+    .filter(p => {
+      const d = new Date(p.date);
+      return d.getMonth() === lastM && d.getFullYear() === lastY;
+    })
+    .reduce((s, p) => s + p.amount, 0);
+
+  const lastMonthBalance = paidLastMonth - expectedLastMonth;
+
+  // 4. Final current balance = (Paid this month - Expected this month) + Last Month's leftover
+  const currentBalance = (paidThisMonth - expectedThisMonth) + lastMonthBalance;
+
+  return { 
+    expectedThisMonth, 
+    paidThisMonth, 
+    lastMonthBalance, 
+    currentBalance 
+  };
 }
 
 // --- 4. SEND DAILY SMS (Triggered by Cron) ---
@@ -75,15 +108,19 @@ app.post('/daily-sms', async (req, res) => {
   const results = [];
 
   for (const bike of bikes) {
-    const { balance, expected, paid } = calculateBalance(bike);
-    if (expected === 0) continue; 
-
+    // Skip if there is no schedule set
+    if (!bike.schedule || bike.schedule.amount === 0) continue;
+    
+    const { currentBalance } = calculateBalance(bike);
     const phone = bike.phone.startsWith('+') ? bike.phone : '+' + bike.phone;
     
-    // Message logic
-    const message = balance >= 0
-      ? `Habari ${bike.name}, leo umelipa KSh ${paid} kati ya KSh ${expected}. Salio lako ni +KSh ${balance}. Asante!`
-      : `Habari ${bike.name}, leo umelipa KSh ${paid} kati ya KSh ${expected}. Unadaiwa KSh ${Math.abs(balance)}. Tafadhali lipa leo.`;
+    // Clean Swahili Message Logic
+    let message = '';
+    if (currentBalance >= 0) {
+      message = `Habari ${bike.name}, malipo yamepokelewa. Salio lako la mwezi huu ni +KSh ${currentBalance}. Asante kwa kulipa kwa wakati.`;
+    } else {
+      message = `Habari ${bike.name}, malipo yamepokelewa. Unadaiwa KSh ${Math.abs(currentBalance)}. Tafadhali lipa kwa wakati ili kuepuka usumbufu.`;
+    }
 
     try {
       const smsRes = await fetch('https://api.textbee.dev/api/v1/gateway/send-sms', {
