@@ -44,35 +44,35 @@ app.post('/push', async (req, res) => {
   }
 });
 
-// --- 3. WEEKLY BALANCE CALCULATOR ---
+// --- 3. WEEKLY BALANCE CALCULATOR (Mon-Sun) ---
 function calculateWeeklyBalance(bike) {
   const amount = bike.schedule?.amount || 0;
   const days = bike.schedule?.days || [true, true, true, true, true, true, true];
   
   const now = new Date();
   
-  // Get Monday of the current week
-  const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon...
+  // 1. Find Monday of THIS week
+  const dayOfWeek = now.getDay(); 
   const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
   const startOfThisWeek = new Date(now);
   startOfThisWeek.setDate(now.getDate() - diffToMonday);
   startOfThisWeek.setHours(0,0,0,0);
 
-  // Get Monday of last week
+  // 2. Find Monday of LAST week
   const startOfLastWeek = new Date(startOfThisWeek);
   startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
 
-  // 1. Expected for THIS week (Monday up to today)
+  // 3. Expected for THIS week (Full Monday to Sunday)
   let expectedThisWeek = 0;
   let tempDate = new Date(startOfThisWeek);
-  while (tempDate <= now) {
+  for (let i = 0; i < 7; i++) {
     const jsDay = tempDate.getDay(); 
     const idx = jsDay === 0 ? 6 : jsDay - 1; 
     if (days[idx]) expectedThisWeek += amount;
     tempDate.setDate(tempDate.getDate() + 1);
   }
 
-  // 2. Paid THIS week
+  // 4. Paid THIS week
   const paidThisWeek = (bike.payments || [])
     .filter(p => {
       const d = new Date(p.date);
@@ -80,7 +80,7 @@ function calculateWeeklyBalance(bike) {
     })
     .reduce((s, p) => s + p.amount, 0);
 
-  // 3. Expected for LAST week (Full Monday to Sunday)
+  // 5. Expected for LAST week
   let expectedLastWeek = 0;
   let tempLastDate = new Date(startOfLastWeek);
   for (let i = 0; i < 7; i++) {
@@ -90,7 +90,7 @@ function calculateWeeklyBalance(bike) {
     tempLastDate.setDate(tempLastDate.getDate() + 1);
   }
 
-  // 4. Paid LAST week
+  // 6. Paid LAST week
   const paidLastWeek = (bike.payments || [])
     .filter(p => {
       const d = new Date(p.date);
@@ -98,8 +98,10 @@ function calculateWeeklyBalance(bike) {
     })
     .reduce((s, p) => s + p.amount, 0);
 
-  // 5. Calculate carry-over and current balance
+  // 7. Carry-over balance from last week
   const lastWeekBalance = paidLastWeek - expectedLastWeek;
+
+  // 8. Final balance
   const currentBalance = (paidThisWeek - expectedThisWeek) + lastWeekBalance;
 
   return { 
@@ -116,18 +118,17 @@ app.post('/daily-sms', async (req, res) => {
   const results = [];
 
   for (const bike of bikes) {
-    // Skip if there is no schedule set
     if (!bike.schedule || bike.schedule.amount === 0) continue;
     
     const { currentBalance } = calculateWeeklyBalance(bike);
     const phone = bike.phone.startsWith('+') ? bike.phone : '+' + bike.phone;
     
-    // Swahili Message Logic for Weekly Balance
+    // --- UPDATED SWAHILI MESSAGE LOGIC ---
     let message = '';
     if (currentBalance >= 0) {
-      message = `Habari ${bike.name}, malipo yamepokelewa. Salio lako la wiki hii ni +KSh ${currentBalance}. Asante kwa kulipa kwa wakati.`;
+      message = `Habari ${bike.name}, salio lako la wiki ni +KSh ${currentBalance}. Umelipa vizuri, asante na uendelee hivyo.`;
     } else {
-      message = `Habari ${bike.name}, malipo yamepokelewa. Unadaiwa KSh ${Math.abs(currentBalance)} kwa wiki hii. Tafadhali lipa kwa wakati ili kuepuka usumbufu.`;
+      message = `Habari ${bike.name}, salio lako la wiki ni -KSh ${Math.abs(currentBalance)}. Tafadhali lipa kwa wakati ili kuepuka usumbufu.`;
     }
 
     try {
