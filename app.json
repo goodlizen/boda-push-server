@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "e77d2fb2-a277-4e31-9a79-bdfc972c3002"
+      }
+    },
+    "android": {
+      "package": "com.lizenmn.bodapushserver"
+    }
+  }
+}

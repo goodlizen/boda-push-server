@@ -6,8 +6,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Setup Database
-const defaultData = { bikes: [] };
+// Setup Database (Added lastSmsSent to track daily sends)
+const defaultData = { bikes: [], lastSmsSent: {} };
 const db = await JSONFilePreset('db.json', defaultData);
 
 const EXPO_PUSH = 'https://exp.host/--/api/v2/push/send';
@@ -116,14 +116,24 @@ function calculateWeeklyBalance(bike) {
 app.post('/daily-sms', async (req, res) => {
   const bikes = db.data.bikes;
   const results = [];
+  
+  // Get today's date string in East Africa Time (e.g., "2026-11-12")
+  // We use EAT timezone because you are in Kenya
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' }); 
 
   for (const bike of bikes) {
     if (!bike.schedule || bike.schedule.amount === 0) continue;
     
+    // 🛑 SAFETY LOCK: Check if we already sent an SMS to this bike today
+    if (db.data.lastSmsSent[bike.id] === todayStr) {
+      results.push({ plate: bike.plate, status: 'skipped (already sent today)' });
+      continue; 
+    }
+    
     const { currentBalance } = calculateWeeklyBalance(bike);
     const phone = bike.phone.startsWith('+') ? bike.phone : '+' + bike.phone;
     
-    // --- UPDATED SWAHILI MESSAGE LOGIC ---
+    // Swahili Message Logic
     let message = '';
     if (currentBalance >= 0) {
       message = `Habari ${bike.name}, salio lako la wiki ni +KSh ${currentBalance}. Umelipa vizuri, asante na uendelee hivyo.`;
@@ -145,13 +155,21 @@ app.post('/daily-sms', async (req, res) => {
         }),
       });
       
-      const data = await smsRes.json();
-      console.log(`SMS to ${bike.name}:`, data);
-      results.push({ plate: bike.plate, status: 'sent' });
+      if (smsRes.ok) {
+        // ✅ Mark as sent for today
+        db.data.lastSmsSent[bike.id] = todayStr;
+        results.push({ plate: bike.plate, status: 'sent' });
+      } else {
+        results.push({ plate: bike.plate, status: 'failed to send' });
+      }
+      
     } catch (e) {
       results.push({ plate: bike.plate, status: 'failed', error: String(e) });
     }
   }
+
+  // Save the database so it remembers who was texted today
+  await db.write();
 
   res.json({ ok: true, count: results.length, results });
 });
