@@ -45,12 +45,16 @@ app.post('/push', async (req, res) => {
 });
 
 // --- 3. WEEKLY BALANCE CALCULATOR (Mon-Sun) ---
-function calculateWeeklyBalance(bike) {
+/** 
+ * WEEKLY BALANCE CALCULATOR (Resets logically day by day)
+ */
+export function calculateWeeklyBalance(bike) {
   const amount = bike.schedule?.amount || 0;
   const days = bike.schedule?.days || [true, true, true, true, true, true, true];
   
   const now = new Date();
-  
+  now.setHours(23, 59, 59, 999); // Treat today as almost over so we don't under-count today
+
   // 1. Find Monday of THIS week
   const dayOfWeek = now.getDay(); 
   const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
@@ -62,10 +66,10 @@ function calculateWeeklyBalance(bike) {
   const startOfLastWeek = new Date(startOfThisWeek);
   startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
 
-  // 3. Expected for THIS week (Full Monday to Sunday)
+  // 3. Expected for THIS week (Monday up to TODAY)
   let expectedThisWeek = 0;
   let tempDate = new Date(startOfThisWeek);
-  for (let i = 0; i < 7; i++) {
+  while (tempDate <= now) {
     const jsDay = tempDate.getDay(); 
     const idx = jsDay === 0 ? 6 : jsDay - 1; 
     if (days[idx]) expectedThisWeek += amount;
@@ -80,7 +84,7 @@ function calculateWeeklyBalance(bike) {
     })
     .reduce((s, p) => s + p.amount, 0);
 
-  // 5. Expected for LAST week
+  // 5. Expected for LAST week (Full week)
   let expectedLastWeek = 0;
   let tempLastDate = new Date(startOfLastWeek);
   for (let i = 0; i < 7; i++) {
@@ -101,7 +105,7 @@ function calculateWeeklyBalance(bike) {
   // 7. Carry-over balance from last week
   const lastWeekBalance = paidLastWeek - expectedLastWeek;
 
-  // 8. Final balance
+  // 8. Final balance (Expected up to today - Paid up to today) + Last Week's carry-over
   const currentBalance = (paidThisWeek - expectedThisWeek) + lastWeekBalance;
 
   return { 
