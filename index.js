@@ -53,42 +53,33 @@ app.get('/stats', (req, res) => {
   const isCurrentMonth = now.toISOString().slice(0, 7) === monthStr;
 
   const bikesData = db.data.bikes.map(bike => {
-    // 1. Income & Expenses for this month
     const monthlyPayments = (bike.payments || []).filter(p => p.date.startsWith(monthStr));
     const totalIncome = monthlyPayments.reduce((s, p) => s + p.amount, 0);
 
     const monthlyExpenses = (bike.expenses || []).filter(e => e.date.startsWith(monthStr));
     const totalExpense = monthlyExpenses.reduce((s, e) => s + e.amount, 0);
 
-    // 2. Calculate Expected & Balance
-    let expectedAmount = 0; 
-    let missedAmount = 0;   
+    let expectedFullMonth = 0; 
+    let expectedUpToYesterday = 0; 
 
-    // If the bike doesn't have a startDate, assume it started at the beginning of time
     const bikeStartDate = bike.startDate ? new Date(bike.startDate) : new Date(2000, 0, 1);
 
     if (bike.schedule && bike.schedule.amount > 0) {
       for (let d = 1; d <= daysInMonth; d++) {
         const checkDate = new Date(year, month - 1, d);
-        
         if (checkDate >= bikeStartDate) {
           const jsDay = checkDate.getDay();
           const idx = jsDay === 0 ? 6 : jsDay - 1; 
-          
           if (bike.schedule.days[idx]) {
-            expectedAmount += bike.schedule.amount;
-
-            // Only count as debt if the day is fully over (yesterday and before)
+            expectedFullMonth += bike.schedule.amount;
             const isPastDay = isCurrentMonth ? (checkDate < todayMidnight) : true;
-            if (isPastDay) {
-              missedAmount += bike.schedule.amount;
-            }
+            if (isPastDay) expectedUpToYesterday += bike.schedule.amount;
           }
         }
       }
     }
 
-    const balance = totalIncome - missedAmount;
+    const balance = totalIncome - expectedUpToYesterday;
 
     return {
       id: bike.id,
@@ -97,7 +88,8 @@ app.get('/stats', (req, res) => {
       totalIncome,
       totalExpense,
       netProfit: totalIncome - totalExpense,
-      expectedAmount,
+      expectedFullMonth,
+      expectedUpToYesterday,
       balance
     };
   });
@@ -110,12 +102,7 @@ app.get('/stats', (req, res) => {
   res.json({
     month: monthStr,
     bikes: bikesData,
-    summary: {
-      income: grandTotalIncome,
-      expense: grandTotalExpense,
-      profit: grandNetProfit,
-      balance: grandBalance
-    }
+    summary: { income: grandTotalIncome, expense: grandTotalExpense, profit: grandNetProfit, balance: grandBalance }
   });
 });
 
@@ -145,7 +132,6 @@ app.post('/daily-sms', async (req, res) => {
     if (!bike.schedule || bike.schedule.amount === 0) continue;
     if (db.data.lastSmsSent[bike.id] === todayStr) continue; 
     
-    // Calculate missed balance (Up to yesterday)
     const now = new Date();
     const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const monthStr = now.toISOString().slice(0, 7);
