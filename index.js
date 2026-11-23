@@ -67,7 +67,88 @@ function computeBikeFinancials(bike, targetDate = new Date()) {
   };
 }
 
-// --- 1. SYNC DATA FROM APP ---
+// --- 1. GET ALL BIKES FROM SERVER ---
+app.get('/bikes', (req, res) => {
+  res.json({ ok: true, bikes: db.data.bikes || [] });
+});
+
+// --- 2. RECORD PAYMENT DIRECTLY TO SERVER ---
+app.post('/add-payment', async (req, res) => {
+  const { bikeId, amount, date } = req.body;
+  if (!bikeId || amount === undefined) {
+    return res.status(400).json({ error: 'bikeId and amount required' });
+  }
+
+  const bike = (db.data.bikes || []).find(b => String(b.id) === String(bikeId));
+  if (!bike) return res.status(404).json({ error: 'Bike not found' });
+
+  if (!bike.payments) bike.payments = [];
+  const payment = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    amount: parseFloat(amount),
+    date: date || new Date().toISOString(),
+  };
+
+  bike.payments.push(payment);
+  await db.write();
+  res.json({ ok: true, bike, payment });
+});
+
+// --- 3. ADD NEW BIKE TO SERVER ---
+app.post('/add-bike', async (req, res) => {
+  const { plate, name, phone, schedule, startDate, serviceDate, id } = req.body;
+  if (!plate || !name) {
+    return res.status(400).json({ error: 'plate and name required' });
+  }
+
+  const newBike = {
+    id: id || Date.now(),
+    plate: plate.trim().toUpperCase(),
+    name: name.trim(),
+    phone: phone ? phone.trim() : '',
+    payments: [],
+    expenses: [],
+    schedule: schedule || { amount: 250, days: [true, true, true, true, true, true, false] },
+    startDate: startDate || new Date().toISOString(),
+    serviceDate: serviceDate || 15,
+  };
+
+  if (!db.data.bikes) db.data.bikes = [];
+  db.data.bikes.push(newBike);
+  await db.write();
+  res.json({ ok: true, bike: newBike });
+});
+
+// --- 4. UPDATE BIKE ON SERVER ---
+app.post('/update-bike', async (req, res) => {
+  const { id, plate, name, phone, schedule, startDate, serviceDate } = req.body;
+  const bike = (db.data.bikes || []).find(b => String(b.id) === String(id));
+  if (!bike) return res.status(404).json({ error: 'Bike not found' });
+
+  if (plate) bike.plate = plate.trim().toUpperCase();
+  if (name) bike.name = name.trim();
+  if (phone !== undefined) bike.phone = phone.trim();
+  if (schedule) bike.schedule = schedule;
+  if (startDate) bike.startDate = startDate;
+  if (serviceDate !== undefined) bike.serviceDate = serviceDate;
+
+  await db.write();
+  res.json({ ok: true, bike });
+});
+
+// --- 5. DELETE BIKE FROM SERVER ---
+app.delete('/bikes/:id', async (req, res) => {
+  const { id } = req.params;
+  const beforeLen = (db.data.bikes || []).length;
+  db.data.bikes = (db.data.bikes || []).filter(b => String(b.id) !== String(id));
+  if (db.data.bikes.length === beforeLen) {
+    return res.status(404).json({ error: 'Bike not found' });
+  }
+  await db.write();
+  res.json({ ok: true });
+});
+
+// --- 6. FULL SYNC DATA (BACKUP / BULK SYNC) ---
 app.post('/sync', async (req, res) => {
   const { bikes } = req.body;
   if (!bikes) return res.status(400).json({ error: 'No bikes provided' });
@@ -77,26 +158,27 @@ app.post('/sync', async (req, res) => {
   res.json({ ok: true, message: 'Data synced' });
 });
 
-// --- 2. ADD EXPENSE ---
+// --- 7. ADD EXPENSE ---
 app.post('/add-expense', async (req, res) => {
   const { bikeId, amount, description } = req.body;
-  const bike = db.data.bikes.find(b => b.id === bikeId);
+  const bike = (db.data.bikes || []).find(b => String(b.id) === String(bikeId));
   if (!bike) return res.status(404).json({ error: 'Bike not found' });
 
   if (!bike.expenses) bike.expenses = [];
   
-  bike.expenses.push({
+  const expense = {
     id: Date.now().toString(),
     amount: parseFloat(amount),
     description: description || 'Service/Maintenance',
     date: new Date().toISOString()
-  });
+  };
+  bike.expenses.push(expense);
 
   await db.write();
-  res.json({ ok: true, expenses: bike.expenses });
+  res.json({ ok: true, expenses: bike.expenses, expense });
 });
 
-// --- 3. GET STATISTICS (Filtered by Month + All-Time Balances) ---
+// --- 8. GET STATISTICS (Filtered by Month + All-Time Balances + Rider Details) ---
 app.get('/stats', (req, res) => {
   const monthStr = req.query.month || new Date().toISOString().slice(0, 7); 
   const [year, month] = monthStr.split('-').map(Number);
@@ -106,7 +188,7 @@ app.get('/stats', (req, res) => {
   const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const isCurrentMonth = now.toISOString().slice(0, 7) === monthStr;
 
-  const bikesData = db.data.bikes.map(bike => {
+  const bikesData = (db.data.bikes || []).map(bike => {
     const monthlyPayments = (bike.payments || []).filter(p => p.date && p.date.startsWith(monthStr));
     const totalIncome = monthlyPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
 
@@ -142,6 +224,10 @@ app.get('/stats', (req, res) => {
       name: bike.name,
       plate: bike.plate,
       phone: bike.phone,
+      startDate: bike.startDate,
+      schedule: bike.schedule,
+      payments: bike.payments || [],
+      expenses: bike.expenses || [],
       totalIncome,
       totalExpense,
       netProfit: totalIncome - totalExpense,
@@ -174,7 +260,7 @@ app.get('/stats', (req, res) => {
   });
 });
 
-// --- 4. SEND PUSH NOTIFICATION ---
+// --- 9. SEND PUSH NOTIFICATION ---
 app.post('/push', async (req, res) => {
   const { to, title, body, data } = req.body;
   if (!to || !title) return res.status(400).json({ error: 'to and title required' });
@@ -190,7 +276,7 @@ app.post('/push', async (req, res) => {
   }
 });
 
-// --- 5. SEND SINGLE SMS TO RIDER ---
+// --- 10. SEND SINGLE SMS TO RIDER ---
 app.post('/send-sms', async (req, res) => {
   const { phone, message, bikeId } = req.body;
   if (!phone || !message) return res.status(400).json({ error: 'phone and message required' });
@@ -220,7 +306,7 @@ app.post('/send-sms', async (req, res) => {
   }
 });
 
-// --- 6. SEND DAILY SMS REMINDERS (Only for riders who have overdue debt) ---
+// --- 11. SEND DAILY SMS REMINDERS (Only for riders who have overdue debt) ---
 app.post('/daily-sms', async (req, res) => {
   const bikes = db.data.bikes || [];
   const results = [];
