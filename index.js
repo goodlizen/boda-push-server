@@ -292,6 +292,12 @@ app.post('/push', async (req, res) => {
   }
 });
 
+// =========================================================================
+// TEMPORARY TESTING CONFIGURATION: LIMIT 1 SMS PER PERSON PER DAY
+// Set ENFORCE_ONE_SMS_PER_DAY = false when testing is finished to restore.
+// =========================================================================
+const ENFORCE_ONE_SMS_PER_DAY = true;
+
 // --- 10. SEND SINGLE SMS TO RIDER ---
 app.post('/send-sms', async (req, res) => {
   const { phone, message, bikeId } = req.body;
@@ -299,6 +305,24 @@ app.post('/send-sms', async (req, res) => {
   
   let formattedPhone = phone.trim();
   if (!formattedPhone.startsWith('+')) formattedPhone = '+' + formattedPhone;
+  const normalizedPhone = formattedPhone.replace(/[^\d+]/g, '');
+
+  if (!db.data.lastSmsSent) db.data.lastSmsSent = {};
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' });
+
+  // Rate-limiting check: maximum 1 SMS per person per day
+  if (ENFORCE_ONE_SMS_PER_DAY) {
+    const alreadySentPhone = db.data.lastSmsSent[normalizedPhone] === todayStr;
+    const alreadySentBike = bikeId && db.data.lastSmsSent[String(bikeId)] === todayStr;
+
+    if (alreadySentPhone || alreadySentBike) {
+      return res.status(429).json({
+        ok: false,
+        limited: true,
+        error: `Daily limit reached: Already sent 1 SMS to this recipient (${formattedPhone}) today (${todayStr}). Temporarily limited to 1 SMS/day during testing.`,
+      });
+    }
+  }
 
   try {
     const smsRes = await fetch('https://api.textbee.dev/api/v1/gateway/send-sms', {
@@ -309,11 +333,12 @@ app.post('/send-sms', async (req, res) => {
 
     const data = await smsRes.json().catch(() => ({}));
     if (smsRes.ok) {
-      if (bikeId && db.data.lastSmsSent) {
-        const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' });
-        db.data.lastSmsSent[bikeId] = todayStr;
-        await db.write();
+      // Record sent date for both phone number and bikeId for today
+      db.data.lastSmsSent[normalizedPhone] = todayStr;
+      if (bikeId) {
+        db.data.lastSmsSent[String(bikeId)] = todayStr;
       }
+      await db.write();
       return res.json({ ok: true, data });
     }
     return res.status(smsRes.status).json({ ok: false, error: data });
@@ -332,8 +357,20 @@ app.post('/daily-sms', async (req, res) => {
 
   for (const bike of bikes) {
     if (!bike.schedule || !bike.schedule.amount) continue;
-    if (db.data.lastSmsSent[bike.id] === todayStr) continue; 
-    
+
+    let phone = (bike.phone || '').trim();
+    if (!phone) continue;
+    if (!phone.startsWith('+')) phone = '+' + phone;
+    const normalizedPhone = phone.replace(/[^\d+]/g, '');
+
+    // Skip if already received SMS today
+    if (ENFORCE_ONE_SMS_PER_DAY) {
+      if (db.data.lastSmsSent[normalizedPhone] === todayStr || db.data.lastSmsSent[String(bike.id)] === todayStr) {
+        results.push({ plate: bike.plate, status: 'skipped', reason: 'already sent today' });
+        continue;
+      }
+    }
+
     // Compute past debt up to yesterday midnight (today is not debt until 12 at night)
     const fin = computeBikeFinancials(bike);
     
@@ -343,10 +380,6 @@ app.post('/daily-sms', async (req, res) => {
     }
 
     const debtOwed = fin.debt;
-    let phone = (bike.phone || '').trim();
-    if (!phone) continue;
-    if (!phone.startsWith('+')) phone = '+' + phone;
-
     const message = `Habari ${bike.name}, unadaiwa KSh ${Math.round(debtOwed).toLocaleString()} kwa pikipiki ${bike.plate}. Tafadhali lipa salio lako kwa wakati. Asante.`;
 
     try {
@@ -357,7 +390,8 @@ app.post('/daily-sms', async (req, res) => {
       });
       
       if (smsRes.ok) {
-        db.data.lastSmsSent[bike.id] = todayStr;
+        db.data.lastSmsSent[normalizedPhone] = todayStr;
+        db.data.lastSmsSent[String(bike.id)] = todayStr;
         results.push({ plate: bike.plate, status: 'sent', debt: debtOwed });
       } else {
         const errText = await smsRes.text().catch(() => '');
@@ -369,6 +403,13 @@ app.post('/daily-sms', async (req, res) => {
   }
   await db.write();
   res.json({ ok: true, results });
+});
+
+// --- 12. RESET SMS LIMITS (For testing convenience) ---
+app.post('/reset-sms-limits', async (req, res) => {
+  db.data.lastSmsSent = {};
+  await db.write();
+  res.json({ ok: true, message: 'Daily SMS rate limits cleared for testing.' });
 });
 
 const PORT = process.env.PORT || 3000;
