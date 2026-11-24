@@ -293,10 +293,10 @@ app.post('/push', async (req, res) => {
 });
 
 // =========================================================================
-// TEMPORARY TESTING CONFIGURATION: LIMIT 1 SMS PER PERSON PER DAY
-// Set ENFORCE_ONE_SMS_PER_DAY = false when testing is finished to restore.
+// PRODUCTION RULE: STRICTLY 1 SMS PER BIKE / RIDER PER CALENDAR DAY
+// Ensures each motorcycle rider receives at most 1 SMS per day.
 // =========================================================================
-const ENFORCE_ONE_SMS_PER_DAY = true;
+const LIMIT_ONE_SMS_PER_BIKE_PER_DAY = true;
 
 // --- 10. SEND SINGLE SMS TO RIDER ---
 app.post('/send-sms', async (req, res) => {
@@ -310,8 +310,8 @@ app.post('/send-sms', async (req, res) => {
   if (!db.data.lastSmsSent) db.data.lastSmsSent = {};
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' });
 
-  // Rate-limiting check: maximum 1 SMS per person per day
-  if (ENFORCE_ONE_SMS_PER_DAY) {
+  // Rate-limiting check: maximum 1 SMS per bike / phone per day
+  if (LIMIT_ONE_SMS_PER_BIKE_PER_DAY) {
     const alreadySentPhone = db.data.lastSmsSent[normalizedPhone] === todayStr;
     const alreadySentBike = bikeId && db.data.lastSmsSent[String(bikeId)] === todayStr;
 
@@ -319,7 +319,7 @@ app.post('/send-sms', async (req, res) => {
       return res.status(429).json({
         ok: false,
         limited: true,
-        error: `Daily limit reached: Already sent 1 SMS to this recipient (${formattedPhone}) today (${todayStr}). Temporarily limited to 1 SMS/day during testing.`,
+        error: `Daily limit reached: Already sent 1 SMS to this bike/rider (${formattedPhone}) today (${todayStr}).`,
       });
     }
   }
@@ -363,8 +363,8 @@ app.post('/daily-sms', async (req, res) => {
     if (!phone.startsWith('+')) phone = '+' + phone;
     const normalizedPhone = phone.replace(/[^\d+]/g, '');
 
-    // Skip if already received SMS today
-    if (ENFORCE_ONE_SMS_PER_DAY) {
+    // Skip if bike or phone already received SMS today
+    if (LIMIT_ONE_SMS_PER_BIKE_PER_DAY) {
       if (db.data.lastSmsSent[normalizedPhone] === todayStr || db.data.lastSmsSent[String(bike.id)] === todayStr) {
         results.push({ plate: bike.plate, status: 'skipped', reason: 'already sent today' });
         continue;
