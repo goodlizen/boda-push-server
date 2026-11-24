@@ -9,6 +9,19 @@ app.use(express.json());
 const defaultData = { bikes: [], lastSmsSent: {} };
 const db = await JSONFilePreset('db.json', defaultData);
 
+// Remove any legacy mock seed bikes from database
+const SEED_PLATES = new Set([
+  'KMEA 123A', 'KMEB 456B', 'KMEC 789C', 'KMED 012D', 'KMEE 345E',
+  'KMEF 678F', 'KMEG 901G', 'KMEH 234H', 'KMEI 567I', 'KMEJ 890J'
+]);
+if (db.data && db.data.bikes && db.data.bikes.length > 0) {
+  const cleaned = db.data.bikes.filter(b => !SEED_PLATES.has(b.plate) && !(b.id >= 1 && b.id <= 10 && b.plate?.startsWith('KME')));
+  if (cleaned.length !== db.data.bikes.length) {
+    db.data.bikes = cleaned;
+    await db.write();
+  }
+}
+
 const EXPO_PUSH = 'https://exp.host/--/api/v2/push/send';
 const TEXTBEE_API_KEY = 'txb_NnDVNeC0AypsSX565SW4SZNSO5lBzsyw';
 const TEXTBEE_DEVICE_ID = '6af42e534fd19e33896cd66a';
@@ -139,13 +152,16 @@ app.post('/update-bike', async (req, res) => {
 // --- 5. DELETE BIKE FROM SERVER ---
 app.delete('/bikes/:id', async (req, res) => {
   const { id } = req.params;
-  const beforeLen = (db.data.bikes || []).length;
   db.data.bikes = (db.data.bikes || []).filter(b => String(b.id) !== String(id));
-  if (db.data.bikes.length === beforeLen) {
-    return res.status(404).json({ error: 'Bike not found' });
-  }
   await db.write();
-  res.json({ ok: true });
+  res.json({ ok: true, message: `Bike ${id} deleted` });
+});
+
+// --- CLEAR ALL BIKES ---
+app.post('/clear-bikes', async (req, res) => {
+  db.data.bikes = [];
+  await db.write();
+  res.json({ ok: true, message: 'All bikes cleared' });
 });
 
 // --- 6. FULL SYNC DATA (BACKUP / BULK SYNC) ---
