@@ -1,25 +1,210 @@
 import express from 'express';
 import cors from 'cors';
 import { JSONFilePreset } from 'lowdb/node';
+import mongoose from 'mongoose';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// =========================================================================
+// 1. DATABASE CONFIGURATION (MONGODB ATLAS OR LOWDB FALLBACK)
+// =========================================================================
+const MONGODB_URI = process.env.MONGODB_URI;
+let useMongo = false;
+
+const BikeSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  plate: { type: String, required: true },
+  name: { type: String, required: true },
+  phone: { type: String, default: '' },
+  startDate: { type: String, default: () => new Date().toISOString() },
+  serviceDate: { type: Number, default: 15 },
+  schedule: {
+    amount: { type: Number, default: 250 },
+    days: { type: [Boolean], default: [true, true, true, true, true, true, false] },
+  },
+  payments: [{
+    id: String,
+    amount: Number,
+    date: String,
+  }],
+  expenses: [{
+    id: String,
+    amount: Number,
+    description: String,
+    date: String,
+  }],
+}, { timestamps: true });
+
+const MetaSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true },
+  value: { type: mongoose.Schema.Types.Mixed, default: {} },
+});
+
+const BikeModel = mongoose.model('Bike', BikeSchema);
+const MetaModel = mongoose.model('Meta', MetaSchema);
+
 const defaultData = { bikes: [], lastSmsSent: {} };
 const db = await JSONFilePreset('db.json', defaultData);
+
+if (MONGODB_URI) {
+  try {
+    await mongoose.connect(MONGODB_URI);
+    useMongo = true;
+    console.log('✅ Connected to MongoDB Atlas cloud database!');
+  } catch (err) {
+    console.error('⚠️ MongoDB Atlas connection error, using local fallback:', err.message);
+  }
+} else {
+  console.log('ℹ️ Running on local storage. Set MONGODB_URI environment variable on Render for cloud persistence.');
+}
 
 // Remove any legacy mock seed bikes from database
 const SEED_PLATES = new Set([
   'KMEA 123A', 'KMEB 456B', 'KMEC 789C', 'KMED 012D', 'KMEE 345E',
   'KMEF 678F', 'KMEG 901G', 'KMEH 234H', 'KMEI 567I', 'KMEJ 890J'
 ]);
-if (db.data && db.data.bikes && db.data.bikes.length > 0) {
-  const cleaned = db.data.bikes.filter(b => !SEED_PLATES.has(b.plate) && !(b.id >= 1 && b.id <= 10 && b.plate?.startsWith('KME')));
-  if (cleaned.length !== db.data.bikes.length) {
-    db.data.bikes = cleaned;
-    await db.write();
+
+async function cleanLegacySeedBikes() {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    await BikeModel.deleteMany({ plate: { $in: Array.from(SEED_PLATES) } });
+  } else if (db.data && db.data.bikes && db.data.bikes.length > 0) {
+    const cleaned = db.data.bikes.filter(b => !SEED_PLATES.has(b.plate) && !(b.id >= 1 && b.id <= 10 && b.plate?.startsWith('KME')));
+    if (cleaned.length !== db.data.bikes.length) {
+      db.data.bikes = cleaned;
+      await db.write();
+    }
   }
+}
+await cleanLegacySeedBikes().catch(() => {});
+
+// Database Abstraction Functions
+async function getBikesList() {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    return await BikeModel.find({}).lean();
+  }
+  return db.data.bikes || [];
+}
+
+async function setBikesList(bikes) {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    await BikeModel.deleteMany({});
+    if (bikes && bikes.length > 0) {
+      await BikeModel.insertMany(bikes.map(b => ({ ...b, id: String(b.id) })));
+    }
+    return;
+  }
+  db.data.bikes = bikes;
+  await db.write();
+}
+
+async function addBikeItem(newBike) {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    const created = await BikeModel.create({ ...newBike, id: String(newBike.id) });
+    return created.toObject();
+  }
+  if (!db.data.bikes) db.data.bikes = [];
+  db.data.bikes.push(newBike);
+  await db.write();
+  return newBike;
+}
+
+async function updateBikeItem(id, updates) {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    return await BikeModel.findOneAndUpdate(
+      { id: String(id) },
+      { $set: updates },
+      { new: true, lean: true }
+    );
+  }
+  const bike = (db.data.bikes || []).find(b => String(b.id) === String(id));
+  if (!bike) return null;
+  Object.assign(bike, updates);
+  await db.write();
+  return bike;
+}
+
+async function deleteBikeItem(id) {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    await BikeModel.deleteOne({ id: String(id) });
+    return;
+  }
+  db.data.bikes = (db.data.bikes || []).filter(b => String(b.id) !== String(id));
+  await db.write();
+}
+
+async function addPaymentItem(bikeId, payment) {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    return await BikeModel.findOneAndUpdate(
+      { id: String(bikeId) },
+      { $push: { payments: payment } },
+      { new: true, lean: true }
+    );
+  }
+  const bike = (db.data.bikes || []).find(b => String(b.id) === String(bikeId));
+  if (!bike) return null;
+  if (!bike.payments) bike.payments = [];
+  bike.payments.push(payment);
+  await db.write();
+  return bike;
+}
+
+async function addExpenseItem(bikeId, expense) {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    return await BikeModel.findOneAndUpdate(
+      { id: String(bikeId) },
+      { $push: { expenses: expense } },
+      { new: true, lean: true }
+    );
+  }
+  const bike = (db.data.bikes || []).find(b => String(b.id) === String(bikeId));
+  if (!bike) return null;
+  if (!bike.expenses) bike.expenses = [];
+  bike.expenses.push(expense);
+  await db.write();
+  return bike;
+}
+
+async function getLastSmsMap() {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    const meta = await MetaModel.findOne({ key: 'lastSmsSent' }).lean();
+    return meta?.value || {};
+  }
+  return db.data.lastSmsSent || {};
+}
+
+async function recordLastSmsSent(keys, todayStr) {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    const current = (await MetaModel.findOne({ key: 'lastSmsSent' }).lean())?.value || {};
+    for (const k of keys) {
+      if (k) current[k] = todayStr;
+    }
+    await MetaModel.findOneAndUpdate(
+      { key: 'lastSmsSent' },
+      { $set: { value: current } },
+      { upsert: true }
+    );
+    return;
+  }
+  if (!db.data.lastSmsSent) db.data.lastSmsSent = {};
+  for (const k of keys) {
+    if (k) db.data.lastSmsSent[k] = todayStr;
+  }
+  await db.write();
+}
+
+async function resetLastSmsSent() {
+  if (useMongo && mongoose.connection.readyState === 1) {
+    await MetaModel.findOneAndUpdate(
+      { key: 'lastSmsSent' },
+      { $set: { value: {} } },
+      { upsert: true }
+    );
+    return;
+  }
+  db.data.lastSmsSent = {};
+  await db.write();
 }
 
 const EXPO_PUSH = 'https://exp.host/--/api/v2/push/send';
@@ -81,8 +266,9 @@ function computeBikeFinancials(bike, targetDate = new Date()) {
 }
 
 // --- 1. GET ALL BIKES FROM SERVER ---
-app.get('/bikes', (req, res) => {
-  res.json({ ok: true, bikes: db.data.bikes || [] });
+app.get('/bikes', async (req, res) => {
+  const bikes = await getBikesList();
+  res.json({ ok: true, bikes, database: useMongo ? 'mongodb_atlas' : 'local_json' });
 });
 
 // --- 2. RECORD PAYMENT DIRECTLY TO SERVER ---
@@ -92,18 +278,15 @@ app.post('/add-payment', async (req, res) => {
     return res.status(400).json({ error: 'bikeId and amount required' });
   }
 
-  const bike = (db.data.bikes || []).find(b => String(b.id) === String(bikeId));
-  if (!bike) return res.status(404).json({ error: 'Bike not found' });
-
-  if (!bike.payments) bike.payments = [];
   const payment = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
     amount: parseFloat(amount),
     date: date || new Date().toISOString(),
   };
 
-  bike.payments.push(payment);
-  await db.write();
+  const bike = await addPaymentItem(bikeId, payment);
+  if (!bike) return res.status(404).json({ error: 'Bike not found' });
+
   res.json({ ok: true, bike, payment });
 });
 
@@ -115,7 +298,7 @@ app.post('/add-bike', async (req, res) => {
   }
 
   const newBike = {
-    id: id || Date.now(),
+    id: String(id || Date.now()),
     plate: plate.trim().toUpperCase(),
     name: name.trim(),
     phone: phone ? phone.trim() : '',
@@ -126,41 +309,37 @@ app.post('/add-bike', async (req, res) => {
     serviceDate: serviceDate || 15,
   };
 
-  if (!db.data.bikes) db.data.bikes = [];
-  db.data.bikes.push(newBike);
-  await db.write();
-  res.json({ ok: true, bike: newBike });
+  const bike = await addBikeItem(newBike);
+  res.json({ ok: true, bike });
 });
 
 // --- 4. UPDATE BIKE ON SERVER ---
 app.post('/update-bike', async (req, res) => {
   const { id, plate, name, phone, schedule, startDate, serviceDate } = req.body;
-  const bike = (db.data.bikes || []).find(b => String(b.id) === String(id));
+  const updates = {};
+  if (plate) updates.plate = plate.trim().toUpperCase();
+  if (name) updates.name = name.trim();
+  if (phone !== undefined) updates.phone = phone.trim();
+  if (schedule) updates.schedule = schedule;
+  if (startDate) updates.startDate = startDate;
+  if (serviceDate !== undefined) updates.serviceDate = serviceDate;
+
+  const bike = await updateBikeItem(id, updates);
   if (!bike) return res.status(404).json({ error: 'Bike not found' });
 
-  if (plate) bike.plate = plate.trim().toUpperCase();
-  if (name) bike.name = name.trim();
-  if (phone !== undefined) bike.phone = phone.trim();
-  if (schedule) bike.schedule = schedule;
-  if (startDate) bike.startDate = startDate;
-  if (serviceDate !== undefined) bike.serviceDate = serviceDate;
-
-  await db.write();
   res.json({ ok: true, bike });
 });
 
 // --- 5. DELETE BIKE FROM SERVER ---
 app.delete('/bikes/:id', async (req, res) => {
   const { id } = req.params;
-  db.data.bikes = (db.data.bikes || []).filter(b => String(b.id) !== String(id));
-  await db.write();
+  await deleteBikeItem(id);
   res.json({ ok: true, message: `Bike ${id} deleted` });
 });
 
 // --- CLEAR ALL BIKES ---
 app.post('/clear-bikes', async (req, res) => {
-  db.data.bikes = [];
-  await db.write();
+  await setBikesList([]);
   res.json({ ok: true, message: 'All bikes cleared' });
 });
 
@@ -169,33 +348,28 @@ app.post('/sync', async (req, res) => {
   const { bikes } = req.body;
   if (!bikes) return res.status(400).json({ error: 'No bikes provided' });
   
-  db.data.bikes = bikes;
-  await db.write();
+  await setBikesList(bikes);
   res.json({ ok: true, message: 'Data synced' });
 });
 
 // --- 7. ADD EXPENSE ---
 app.post('/add-expense', async (req, res) => {
   const { bikeId, amount, description } = req.body;
-  const bike = (db.data.bikes || []).find(b => String(b.id) === String(bikeId));
-  if (!bike) return res.status(404).json({ error: 'Bike not found' });
-
-  if (!bike.expenses) bike.expenses = [];
-  
   const expense = {
     id: Date.now().toString(),
     amount: parseFloat(amount),
     description: description || 'Service/Maintenance',
     date: new Date().toISOString()
   };
-  bike.expenses.push(expense);
 
-  await db.write();
+  const bike = await addExpenseItem(bikeId, expense);
+  if (!bike) return res.status(404).json({ error: 'Bike not found' });
+
   res.json({ ok: true, expenses: bike.expenses, expense });
 });
 
 // --- 8. GET STATISTICS (Filtered by Month + All-Time Balances + Rider Details) ---
-app.get('/stats', (req, res) => {
+app.get('/stats', async (req, res) => {
   const monthStr = req.query.month || new Date().toISOString().slice(0, 7); 
   const [year, month] = monthStr.split('-').map(Number);
   const daysInMonth = new Date(year, month, 0).getDate();
@@ -204,7 +378,9 @@ app.get('/stats', (req, res) => {
   const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const isCurrentMonth = now.toISOString().slice(0, 7) === monthStr;
 
-  const bikesData = (db.data.bikes || []).map(bike => {
+  const rawBikes = await getBikesList();
+
+  const bikesData = rawBikes.map(bike => {
     const monthlyPayments = (bike.payments || []).filter(p => p.date && p.date.startsWith(monthStr));
     const totalIncome = monthlyPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
 
@@ -307,13 +483,13 @@ app.post('/send-sms', async (req, res) => {
   if (!formattedPhone.startsWith('+')) formattedPhone = '+' + formattedPhone;
   const normalizedPhone = formattedPhone.replace(/[^\d+]/g, '');
 
-  if (!db.data.lastSmsSent) db.data.lastSmsSent = {};
+  const lastSmsMap = await getLastSmsMap();
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' });
 
   // Rate-limiting check: maximum 1 SMS per bike / phone per day
   if (LIMIT_ONE_SMS_PER_BIKE_PER_DAY) {
-    const alreadySentPhone = db.data.lastSmsSent[normalizedPhone] === todayStr;
-    const alreadySentBike = bikeId && db.data.lastSmsSent[String(bikeId)] === todayStr;
+    const alreadySentPhone = lastSmsMap[normalizedPhone] === todayStr;
+    const alreadySentBike = bikeId && lastSmsMap[String(bikeId)] === todayStr;
 
     if (alreadySentPhone || alreadySentBike) {
       return res.status(429).json({
@@ -334,11 +510,7 @@ app.post('/send-sms', async (req, res) => {
     const data = await smsRes.json().catch(() => ({}));
     if (smsRes.ok) {
       // Record sent date for both phone number and bikeId for today
-      db.data.lastSmsSent[normalizedPhone] = todayStr;
-      if (bikeId) {
-        db.data.lastSmsSent[String(bikeId)] = todayStr;
-      }
-      await db.write();
+      await recordLastSmsSent([normalizedPhone, bikeId ? String(bikeId) : null], todayStr);
       return res.json({ ok: true, data });
     }
     return res.status(smsRes.status).json({ ok: false, error: data });
@@ -349,11 +521,11 @@ app.post('/send-sms', async (req, res) => {
 
 // --- 11. SEND DAILY SMS REMINDERS (Only for riders who have overdue debt) ---
 app.post('/daily-sms', async (req, res) => {
-  const bikes = db.data.bikes || [];
+  const bikes = await getBikesList();
   const results = [];
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' }); 
 
-  if (!db.data.lastSmsSent) db.data.lastSmsSent = {};
+  const lastSmsMap = await getLastSmsMap();
 
   for (const bike of bikes) {
     if (!bike.schedule || !bike.schedule.amount) continue;
@@ -365,7 +537,7 @@ app.post('/daily-sms', async (req, res) => {
 
     // Skip if bike or phone already received SMS today
     if (LIMIT_ONE_SMS_PER_BIKE_PER_DAY) {
-      if (db.data.lastSmsSent[normalizedPhone] === todayStr || db.data.lastSmsSent[String(bike.id)] === todayStr) {
+      if (lastSmsMap[normalizedPhone] === todayStr || lastSmsMap[String(bike.id)] === todayStr) {
         results.push({ plate: bike.plate, status: 'skipped', reason: 'already sent today' });
         continue;
       }
@@ -390,8 +562,7 @@ app.post('/daily-sms', async (req, res) => {
       });
       
       if (smsRes.ok) {
-        db.data.lastSmsSent[normalizedPhone] = todayStr;
-        db.data.lastSmsSent[String(bike.id)] = todayStr;
+        await recordLastSmsSent([normalizedPhone, String(bike.id)], todayStr);
         results.push({ plate: bike.plate, status: 'sent', debt: debtOwed });
       } else {
         const errText = await smsRes.text().catch(() => '');
@@ -401,15 +572,13 @@ app.post('/daily-sms', async (req, res) => {
       results.push({ plate: bike.plate, status: 'failed', error: String(e) });
     }
   }
-  await db.write();
   res.json({ ok: true, results });
 });
 
-// --- 12. RESET SMS LIMITS (For testing convenience) ---
+// --- 12. RESET SMS LIMITS ---
 app.post('/reset-sms-limits', async (req, res) => {
-  db.data.lastSmsSent = {};
-  await db.write();
-  res.json({ ok: true, message: 'Daily SMS rate limits cleared for testing.' });
+  await resetLastSmsSent();
+  res.json({ ok: true, message: 'Daily SMS rate limits cleared.' });
 });
 
 const PORT = process.env.PORT || 3000;
